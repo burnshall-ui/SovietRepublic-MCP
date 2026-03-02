@@ -1,6 +1,6 @@
 # SovietRepublic-MCP
 
-MCP server for [Workers & Resources: Soviet Republic](https://store.steampowered.com/app/524850/Workers__Resources_Soviet_Republic/). Exposes live game data as tools for Claude Code and Claude Desktop.
+MCP server for [Workers & Resources: Soviet Republic](https://store.steampowered.com/app/784150/Workers__Resources_Soviet_Republic/). Exposes live game data as tools for Claude Code and Claude Desktop.
 
 ## What it does
 
@@ -71,7 +71,6 @@ Restart Claude after editing the config. The server starts automatically when ne
 
 Once connected, ask Claude naturally:
 
-> *"Wie entwickelt sich meine Bevölkerung?"*
 > *"What's my current food supply satisfaction?"*
 > *"Show me steel import history."*
 
