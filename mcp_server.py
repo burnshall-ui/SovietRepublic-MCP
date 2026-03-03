@@ -165,9 +165,128 @@ def tool_get_trade_history(resource: str, currency: str = "rub", direction: str 
     data = []
     for r in records:
         trade_dict = getattr(r, field)
-        val = trade_dict.get(resource)  # None if not traded this period
+        entry = trade_dict.get(resource)
+        val = entry["amount"] if isinstance(entry, dict) else entry
         data.append({"index": r.index, "year": r.year, "day": r.day, "value": val})
     return {"resource": resource, "currency": currency, "direction": direction, "data": data}
+
+
+def _date_key(year: int, day: int) -> int:
+    """Convert year+day to a sortable integer for comparison."""
+    return year * 1000 + day
+
+
+def _find_nearest_record(records: list, year: int, day: int, mode: str = "nearest"):
+    """Find the record nearest to a given date.
+    mode='at_or_after' — first record >= date (for period start)
+    mode='at_or_before' — last record <= date (for period end)
+    mode='nearest' — closest by absolute distance
+    """
+    target = _date_key(year, day)
+    best = None
+    best_dist = float("inf")
+
+    for r in records:
+        rk = _date_key(r.year, r.day)
+        if mode == "at_or_after" and rk < target:
+            continue
+        if mode == "at_or_before" and rk > target:
+            continue
+        dist = abs(rk - target)
+        if dist < best_dist:
+            best = r
+            best_dist = dist
+    return best
+
+
+def _diff_trade_dicts(end_dict: dict, start_dict: dict) -> dict:
+    """Compute per-resource difference between two trade dicts.
+    Values are {amount, cost} dicts. Only includes resources with non-zero diff."""
+    all_keys = set(end_dict.keys()) | set(start_dict.keys())
+    result = {}
+    for k in sorted(all_keys):
+        end_entry = end_dict.get(k, {"amount": 0.0, "cost": 0.0})
+        start_entry = start_dict.get(k, {"amount": 0.0, "cost": 0.0})
+        # Handle legacy format (plain float) gracefully
+        end_amt = end_entry["amount"] if isinstance(end_entry, dict) else end_entry
+        end_cost = end_entry.get("cost", 0.0) if isinstance(end_entry, dict) else 0.0
+        start_amt = start_entry["amount"] if isinstance(start_entry, dict) else start_entry
+        start_cost = start_entry.get("cost", 0.0) if isinstance(start_entry, dict) else 0.0
+
+        diff_amt = round(end_amt - start_amt, 2)
+        diff_cost = round(end_cost - start_cost, 2)
+        if diff_amt != 0.0 or diff_cost != 0.0:
+            result[k] = {"amount": diff_amt, "cost": diff_cost}
+    return result
+
+
+def tool_get_trade_period(
+    start_year: int = None,
+    start_day: int = None,
+    end_year: int = None,
+    end_day: int = None,
+    direction: str = "both",
+    currency: str = "rub",
+) -> dict:
+    """Trade totals for a date range, computed as (end - start) of cumulative values."""
+    records = _load()
+    if not records:
+        return {"error": "No data loaded"}
+
+    # Filter out index-0 records with year=0 (empty/placeholder)
+    valid = [r for r in records if r.year > 0]
+    if not valid:
+        return {"error": "No valid records with date > 0"}
+
+    # Determine start record
+    if start_year is not None:
+        s_day = start_day if start_day is not None else 1
+        start_rec = _find_nearest_record(valid, start_year, s_day, mode="at_or_after")
+    else:
+        start_rec = valid[0]
+
+    # Determine end record
+    if end_year is not None:
+        e_day = end_day if end_day is not None else 365
+        end_rec = _find_nearest_record(valid, end_year, e_day, mode="at_or_before")
+    else:
+        end_rec = valid[-1]
+
+    if start_rec is None or end_rec is None:
+        return {"error": "No records found for the specified date range"}
+
+    if _date_key(end_rec.year, end_rec.day) < _date_key(start_rec.year, start_rec.day):
+        return {"error": f"End date ({end_rec.year}/{end_rec.day}) is before "
+                         f"start date ({start_rec.year}/{start_rec.day})"}
+
+    result = {
+        "period": {
+            "from": f"{start_rec.year}/{start_rec.day}",
+            "to": f"{end_rec.year}/{end_rec.day}",
+        },
+        "currency": currency,
+    }
+
+    import_field = _TRADE_FIELD_MAP.get(("import", currency))
+    export_field = _TRADE_FIELD_MAP.get(("export", currency))
+
+    if import_field is None or export_field is None:
+        return {"error": f"Invalid currency: {currency!r}. "
+                         f"Valid: rub, usd, international_rub, international_usd"}
+
+    if direction in ("both", "import"):
+        result["imports"] = _diff_trade_dicts(
+            getattr(end_rec, import_field),
+            getattr(start_rec, import_field),
+        )
+
+    if direction in ("both", "export"):
+        result["exports"] = _diff_trade_dicts(
+            getattr(end_rec, export_field),
+            getattr(start_rec, export_field),
+        )
+
+    return result
 
 
 def tool_list_saves() -> dict:
@@ -226,7 +345,11 @@ TOOLS = [
     ),
     Tool(
         name="get_trade",
-        description="Get current import/export data: which resources were traded this period, in RUB and USD, including vehicle and international trade totals",
+        description=(
+            "Get CUMULATIVE import/export data since game start. Each resource shows "
+            "'amount' (tonnes, MWh, etc.) and 'cost' (total spent/earned in the currency). "
+            "For trade in a specific time period, use get_trade_period instead."
+        ),
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
@@ -251,6 +374,44 @@ TOOLS = [
             "required": ["resource"],
         },
     ),
+    Tool(
+        name="get_trade_period",
+        description=(
+            "Get import/export totals for a date range. Returns the DIFFERENCE "
+            "between cumulative trade values at end vs start, giving you the actual "
+            "trade volume for that period. Omit start for 'since game start', omit "
+            "end for 'until now'. Returns all traded resources with amount and cost."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "start_year": {
+                    "type": "integer",
+                    "description": "Start year (e.g. 1953). Omit for game start.",
+                },
+                "start_day": {
+                    "type": "integer",
+                    "description": "Start day of year (1-365). Default: 1",
+                },
+                "end_year": {
+                    "type": "integer",
+                    "description": "End year (e.g. 1954). Omit for latest data.",
+                },
+                "end_day": {
+                    "type": "integer",
+                    "description": "End day of year (1-365). Default: 365",
+                },
+                "direction": {
+                    "type": "string",
+                    "description": "Trade direction: 'import', 'export', or 'both'. Default: 'both'",
+                },
+                "currency": {
+                    "type": "string",
+                    "description": "Currency: 'rub', 'usd', 'international_rub', 'international_usd'. Default: 'rub'",
+                },
+            },
+        },
+    ),
 ]
 
 
@@ -273,6 +434,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             arguments.get("resource"),
             arguments.get("currency", "rub"),
             arguments.get("direction", "import"),
+        ),
+        "get_trade_period": lambda: tool_get_trade_period(
+            arguments.get("start_year"),
+            arguments.get("start_day"),
+            arguments.get("end_year"),
+            arguments.get("end_day"),
+            arguments.get("direction", "both"),
+            arguments.get("currency", "rub"),
         ),
     }
     fn = dispatch.get(name)

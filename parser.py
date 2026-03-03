@@ -141,13 +141,19 @@ def parse_stats_file(path: Path) -> list[StatRecord]:
             continue
 
         # Trade resource line (indented): "   fuel 14.000004 0.000000"
+        #   parts[1] = cumulative amount (tonnes, MWh, etc.)
+        #   parts[2] = cumulative cost (RUB or USD depending on section)
         if line != stripped and stripped and current_trade_section:
             parts = stripped.split()
             if len(parts) >= 2:
                 name = parts[0]
                 try:
                     amount = float(parts[1])
-                    getattr(current, current_trade_section)[name] = amount
+                    cost = float(parts[2]) if len(parts) >= 3 else 0.0
+                    getattr(current, current_trade_section)[name] = {
+                        "amount": amount,
+                        "cost": cost,
+                    }
                 except ValueError:
                     pass
             continue
