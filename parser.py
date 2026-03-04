@@ -22,6 +22,10 @@ class StatRecord:
     trade_import_international_usd: dict = field(default_factory=dict)
     trade_export_international_usd: dict = field(default_factory=dict)
     trade_vehicles: dict = field(default_factory=dict)
+    spend_constructions: dict = field(default_factory=dict)
+    spend_factories: dict = field(default_factory=dict)
+    spend_shops: dict = field(default_factory=dict)
+    spend_vehicles: dict = field(default_factory=dict)
 
     @property
     def total_population(self) -> int:
@@ -50,6 +54,10 @@ def parse_stats_file(path: Path) -> list[StatRecord]:
         "$Resources_ExportInternationalRUB": "trade_export_international_rub",
         "$Resources_ImportInternationalUSD": "trade_import_international_usd",
         "$Resources_ExportInternationalUSD": "trade_export_international_usd",
+        "$Resources_SpendConstructions":     "spend_constructions",
+        "$Resources_SpendFactories":         "spend_factories",
+        "$Resources_SpendShops":             "spend_shops",
+        "$Resources_SpendVehicles":          "spend_vehicles",
     }
 
     VEHICLE_KEYS = {

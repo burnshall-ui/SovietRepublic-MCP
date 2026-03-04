@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 STATS_PATH = Path(__file__).parent.parent / "media_soviet" / "save" / "autosave1" / "stats.ini"
 SAVES_DIR = STATS_PATH.parent.parent  # media_soviet/save/
+BUILDINGS_DIR = Path(__file__).parent.parent / "media_soviet" / "buildings_types"
 
 
 def _load() -> list:
@@ -150,25 +151,12 @@ _TRADE_FIELD_MAP = {
     ("export", "international_usd"): "trade_export_international_usd",
 }
 
-
-def tool_get_trade_history(resource: str, currency: str = "rub", direction: str = "import") -> dict:
-    if not resource:
-        return {"error": "Missing required argument: resource"}
-    field = _TRADE_FIELD_MAP.get((direction, currency))
-    if field is None:
-        return {"error": f"Invalid params: direction={direction!r}, currency={currency!r}. "
-                         f"Valid currency: rub, usd, international_rub, international_usd. "
-                         f"Valid direction: import, export."}
-    records = _load()
-    if not records:
-        return {"resource": resource, "currency": currency, "direction": direction, "data": []}
-    data = []
-    for r in records:
-        trade_dict = getattr(r, field)
-        entry = trade_dict.get(resource)
-        val = entry["amount"] if isinstance(entry, dict) else entry
-        data.append({"index": r.index, "year": r.year, "day": r.day, "value": val})
-    return {"resource": resource, "currency": currency, "direction": direction, "data": data}
+_SPEND_FIELD_MAP = {
+    "constructions": "spend_constructions",
+    "factories":     "spend_factories",
+    "shops":         "spend_shops",
+    "vehicles":      "spend_vehicles",
+}
 
 
 def _date_key(year: int, day: int) -> int:
@@ -216,7 +204,7 @@ def _diff_trade_dicts(end_dict: dict, start_dict: dict) -> dict:
         diff_amt = round(end_amt - start_amt, 2)
         diff_cost = round(end_cost - start_cost, 2)
         if diff_amt != 0.0 or diff_cost != 0.0:
-            result[k] = {"amount": diff_amt, "cost": diff_cost}
+            result[k] = {"quantity": diff_amt, "cost": diff_cost}
     return result
 
 
@@ -289,6 +277,262 @@ def tool_get_trade_period(
     return result
 
 
+def _parse_building(path: Path) -> dict:
+    result = {
+        "name": path.stem,
+        "type": None,
+        "workers_needed": None,
+        "production": {},
+        "consumption": {},
+        "consumption_per_second": {},
+    }
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.strip().split()
+        if not parts:
+            continue
+        tok = parts[0]
+        if len(parts) == 1 and tok.startswith("$TYPE_"):
+            result["type"] = tok[1:]  # e.g. "TYPE_FACTORY"
+        elif tok == "$WORKERS_NEEDED" and len(parts) >= 2:
+            try:
+                result["workers_needed"] = int(float(parts[1]))
+            except ValueError:
+                pass
+        elif tok == "$PRODUCTION" and len(parts) >= 3:
+            try:
+                result["production"][parts[1]] = float(parts[2])
+            except ValueError:
+                pass
+        elif tok == "$CONSUMPTION" and len(parts) >= 3:
+            try:
+                result["consumption"][parts[1]] = float(parts[2])
+            except ValueError:
+                pass
+        elif tok == "$CONSUMPTION_PER_SECOND" and len(parts) >= 3:
+            try:
+                result["consumption_per_second"][parts[1]] = float(parts[2])
+            except ValueError:
+                pass
+    return result
+
+
+def _load_buildings() -> list[dict]:
+    if not BUILDINGS_DIR.exists():
+        return []
+    return [_parse_building(p) for p in sorted(BUILDINGS_DIR.glob("*.ini"))]
+
+
+def tool_list_buildings(type: str = None, produces: str = None, consumes: str = None) -> dict:
+    buildings = _load_buildings()
+    filtered = any([type, produces, consumes])
+    results = []
+    for b in buildings:
+        if type and (b["type"] is None or type.upper() not in b["type"].upper()):
+            continue
+        if produces and produces.lower() not in b["production"]:
+            continue
+        if consumes:
+            c_lower = consumes.lower()
+            if c_lower not in b["consumption"] and c_lower not in b["consumption_per_second"]:
+                continue
+        if filtered:
+            results.append({
+                "name": b["name"],
+                "type": b["type"],
+                "workers": b["workers_needed"],
+                "produces": sorted(b["production"].keys()),
+                "consumes": sorted(set(b["consumption"]) | set(b["consumption_per_second"])),
+            })
+        else:
+            # Compact format without filters: only buildings with meaningful data
+            if not (b["workers_needed"] or b["production"] or b["consumption"]):
+                continue
+            results.append({"name": b["name"], "type": b["type"], "workers": b["workers_needed"]})
+    note = None if filtered else "No filter applied — showing buildings with workers/I/O data only. Use type/produces/consumes filters for full details."
+    result = {"count": len(results), "buildings": results}
+    if note:
+        result["note"] = note
+    return result
+
+
+def tool_get_building_info(name: str) -> dict:
+    if not name:
+        return {"error": "Missing required argument: name"}
+    path = BUILDINGS_DIR / f"{name}.ini"
+    if not path.exists():
+        # Try case-insensitive search
+        matches = [p for p in BUILDINGS_DIR.glob("*.ini") if p.stem.lower() == name.lower()]
+        if not matches:
+            return {"error": f"Building '{name}' not found. Use list_buildings to browse available buildings."}
+        path = matches[0]
+    return _parse_building(path)
+
+
+def tool_get_spend_period(
+    section: str = "all",
+    start_year: int = None,
+    start_day: int = None,
+    end_year: int = None,
+    end_day: int = None,
+) -> dict:
+    if section != "all" and section not in _SPEND_FIELD_MAP:
+        return {"error": f"Invalid section: {section!r}. Valid: {list(_SPEND_FIELD_MAP)} + 'all'"}
+    records = _load()
+    if not records:
+        return {"error": "No data loaded"}
+    valid = [r for r in records if r.year > 0]
+    if not valid:
+        return {"error": "No valid records"}
+
+    s_day = start_day if start_day is not None else 1
+    e_day = end_day   if end_day   is not None else 365
+    start_rec = _find_nearest_record(valid, start_year, s_day, "at_or_after")  if start_year is not None else valid[0]
+    end_rec   = _find_nearest_record(valid, end_year,   e_day, "at_or_before") if end_year   is not None else valid[-1]
+
+    if start_rec is None or end_rec is None:
+        return {"error": "No records found for the specified date range"}
+    if _date_key(end_rec.year, end_rec.day) < _date_key(start_rec.year, start_rec.day):
+        return {"error": "End date is before start date"}
+
+    sections = list(_SPEND_FIELD_MAP) if section == "all" else [section]
+    result = {
+        "period": {"from": f"{start_rec.year}/{start_rec.day}", "to": f"{end_rec.year}/{end_rec.day}"},
+    }
+    for sec in sections:
+        field = _SPEND_FIELD_MAP[sec]
+        result[sec] = _diff_trade_dicts(getattr(end_rec, field), getattr(start_rec, field))
+    return result
+
+
+def _build_resource_producer_map() -> dict:
+    """Returns {resource: [building_dict, ...]} for all buildings."""
+    result = {}
+    for b in _load_buildings():
+        for resource in b["production"]:
+            result.setdefault(resource, []).append(b)
+    return result
+
+
+def _trace_chain(resource: str, producer_map: dict, visited: set, depth: int = 0) -> dict:
+    if depth > 6:
+        return {"resource": resource, "producers": [], "note": "max depth reached"}
+    producers_raw = producer_map.get(resource, [])
+    if not producers_raw:
+        return {"resource": resource, "producers": []}
+
+    def efficiency(b):
+        w = b["workers_needed"] or 1
+        return b["production"].get(resource, 0) / w
+
+    best = max(producers_raw, key=efficiency)
+
+    producers_out = []
+    for b in producers_raw:
+        if b["name"] in visited:
+            continue
+        visited.add(b["name"])
+
+        all_consumed = {**b["consumption"]}
+        for r, rate in b["consumption_per_second"].items():
+            all_consumed[r] = all_consumed.get(r, 0) + rate * 3600
+
+        inputs = {}
+        for inp_resource, inp_rate in all_consumed.items():
+            sub = _trace_chain(inp_resource, producer_map, visited.copy(), depth + 1)
+            inputs[inp_resource] = {
+                "rate": inp_rate,
+                "produced_by": [p["building"] for p in sub["producers"]],
+            }
+
+        producers_out.append({
+            "building": b["name"],
+            "workers": b["workers_needed"],
+            "output_rate": b["production"].get(resource, 0),
+            "efficiency": round(efficiency(b), 6),
+            "recommended": b["name"] == best["name"],
+            "inputs": inputs,
+        })
+
+    return {"resource": resource, "producers": producers_out}
+
+
+def tool_get_production_chain(resource: str) -> dict:
+    if not resource:
+        return {"error": "Missing required argument: resource"}
+    producer_map = _build_resource_producer_map()
+    if resource not in producer_map:
+        return {"resource": resource, "producers": [],
+                "note": "No building produces this resource — it is a raw material or import."}
+    return _trace_chain(resource, producer_map, set())
+
+
+def tool_get_break_even(building: str) -> dict:
+    if not building:
+        return {"error": "Missing required argument: building"}
+    path = BUILDINGS_DIR / f"{building}.ini"
+    if not path.exists():
+        matches = [p for p in BUILDINGS_DIR.glob("*.ini") if p.stem.lower() == building.lower()]
+        if not matches:
+            return {"error": f"Building '{building}' not found. Use list_buildings to browse."}
+        path = matches[0]
+    b = _parse_building(path)
+
+    records = _load()
+    if not records:
+        return {"error": "No economy data loaded"}
+    rec = records[-1]
+    prices_rub = rec.economy_rub
+    workday_cost = rec.economy_scalars.get("Economy_WorkdayCostRUB", 0.0)
+
+    total_input_cost = 0.0
+    inputs_detail = {}
+    for resource, rate in b["consumption"].items():
+        price = prices_rub.get(resource)
+        cost = price * rate if price is not None else None
+        if cost is not None:
+            total_input_cost += cost
+        inputs_detail[resource] = {
+            "rate": rate,
+            "price_rub": price,
+            "cost_per_period": round(cost, 4) if cost is not None else "price unknown",
+        }
+    for resource, rate in b["consumption_per_second"].items():
+        price = prices_rub.get(resource)
+        key = f"{resource}_per_second" if resource in inputs_detail else resource
+        inputs_detail[key] = {
+            "rate_per_second": rate,
+            "price_rub": price,
+            "note": "per-second rate — not included in material cost sum",
+        }
+
+    outputs = {}
+    for resource, output_rate in b["production"].items():
+        if output_rate <= 0:
+            continue
+        import_price = prices_rub.get(resource)
+        mat_cost_per_unit = round(total_input_cost / output_rate, 4)
+        margin = round(import_price - mat_cost_per_unit, 4) if import_price is not None else None
+        outputs[resource] = {
+            "output_rate": output_rate,
+            "import_price": import_price,
+            "material_cost_per_unit": mat_cost_per_unit,
+            "margin_per_unit": margin,
+            "profitable_vs_import": (margin > 0) if margin is not None else None,
+        }
+
+    result = {
+        "building": b["name"],
+        "type": b["type"],
+        "workers": b["workers_needed"],
+        "workday_cost_rub": workday_cost if workday_cost else "not set",
+        "inputs": inputs_detail,
+        "outputs": outputs,
+    }
+    if not workday_cost:
+        result["note"] = "Worker salary (Economy_WorkdayCostRUB) is 0 — margin excludes labor costs."
+    return result
+
+
 def tool_list_saves() -> dict:
     saves = []
     if SAVES_DIR.exists():
@@ -339,6 +583,103 @@ TOOLS = [
         },
     ),
     Tool(
+        name="list_buildings",
+        description=(
+            "List buildings from game definition files, optionally filtered by type, "
+            "resource produced, or resource consumed. "
+            "With filters: returns name, type, workers, and full I/O resource lists. "
+            "Without filters: returns compact list (name, type, workers) of all buildings with workers/I/O data. "
+            "Use get_building_info for full production/consumption rates of one building."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "Filter by building type, e.g. 'FACTORY', 'POWERPLANT', 'LIVING', 'STORAGE'. Case-insensitive partial match.",
+                },
+                "produces": {
+                    "type": "string",
+                    "description": "Filter to buildings that produce this resource, e.g. 'eletric', 'steel', 'food'.",
+                },
+                "consumes": {
+                    "type": "string",
+                    "description": "Filter to buildings that consume this resource, e.g. 'coal', 'eletric', 'water'.",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="get_building_info",
+        description=(
+            "Get full production/consumption details for a specific building. "
+            "Returns workers needed, all produced resources with output rates, "
+            "and all consumed resources with input rates. "
+            "Use list_buildings first to find the building name."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Building filename without .ini, e.g. 'powerplant_coal', 'alumina_plant'.",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    Tool(
+        name="get_spend_period",
+        description=(
+            "Get resource consumption totals for a date range, by category. "
+            "section: 'constructions' (building materials), 'factories' (production inputs), "
+            "'shops' (retail goods), 'vehicles' (fuel), or 'all'. "
+            "Returns quantity (physical units) and cost per resource."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "section": {"type": "string", "description": "Category: 'constructions', 'factories', 'shops', 'vehicles', or 'all'. Default: 'all'"},
+                "start_year": {"type": "integer", "description": "Start year. Omit for game start."},
+                "start_day":  {"type": "integer", "description": "Start day (1-365). Default: 1"},
+                "end_year":   {"type": "integer", "description": "End year. Omit for latest."},
+                "end_day":    {"type": "integer", "description": "End day (1-365). Default: 365"},
+            },
+        },
+    ),
+    Tool(
+        name="get_production_chain",
+        description=(
+            "Trace the full production chain for a resource. Shows all buildings that produce it, "
+            "their input requirements, and recursively what produces those inputs. "
+            "Marks the most efficient producer (highest output/worker ratio) as 'recommended'. "
+            "Leaf inputs with no producer are raw materials or imports."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "resource": {"type": "string", "description": "Resource name, e.g. 'aluminium', 'eletric', 'steel', 'food'"},
+            },
+            "required": ["resource"],
+        },
+    ),
+    Tool(
+        name="get_break_even",
+        description=(
+            "Calculate production profitability for a building. Combines building I/O rates "
+            "with current market prices to show material cost per unit of output vs import price. "
+            "Positive margin = cheaper to produce than import. "
+            "Worker salary (Economy_WorkdayCostRUB) is shown for reference but not included in margin."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "building": {"type": "string", "description": "Building name, e.g. 'powerplant_coal', 'steel_mill'"},
+            },
+            "required": ["building"],
+        },
+    ),
+    Tool(
         name="list_saves",
         description="List all available save folders",
         inputSchema={"type": "object", "properties": {}},
@@ -346,33 +687,12 @@ TOOLS = [
     Tool(
         name="get_trade",
         description=(
-            "Get CUMULATIVE import/export data since game start. Each resource shows "
-            "'amount' (tonnes, MWh, etc.) and 'cost' (total spent/earned in the currency). "
+            "Get CUMULATIVE import/export data since game start. "
+            "Each resource entry has 'amount' (physical quantity: tonnes, MWh, m³, etc. — NOT money) "
+            "and 'cost' (total currency value spent/earned). "
             "For trade in a specific time period, use get_trade_period instead."
         ),
         inputSchema={"type": "object", "properties": {}},
-    ),
-    Tool(
-        name="get_trade_history",
-        description="Get time series of trade volume for a specific resource across all saved records",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "resource": {
-                    "type": "string",
-                    "description": "Resource name, e.g. 'fuel', 'steel', 'food'",
-                },
-                "currency": {
-                    "type": "string",
-                    "description": "Currency: 'rub', 'usd', 'international_rub', 'international_usd'. Default: 'rub'",
-                },
-                "direction": {
-                    "type": "string",
-                    "description": "Trade direction: 'import' or 'export'. Default: 'import'",
-                },
-            },
-            "required": ["resource"],
-        },
     ),
     Tool(
         name="get_trade_period",
@@ -380,7 +700,9 @@ TOOLS = [
             "Get import/export totals for a date range. Returns the DIFFERENCE "
             "between cumulative trade values at end vs start, giving you the actual "
             "trade volume for that period. Omit start for 'since game start', omit "
-            "end for 'until now'. Returns all traded resources with amount and cost."
+            "end for 'until now'. "
+            "Each resource entry has 'quantity' (physical units: tonnes, MWh, m³, etc. — NOT money) "
+            "and 'cost' (total currency value spent/earned in the specified currency)."
         ),
         inputSchema={
             "type": "object",
@@ -428,13 +750,23 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         "get_economy": lambda: tool_get_economy(),
         "get_citizen_status": lambda: tool_get_citizen_status(),
         "get_history": lambda: tool_get_history(arguments.get("metric", "total_population")),
+        "list_buildings": lambda: tool_list_buildings(
+            arguments.get("type"),
+            arguments.get("produces"),
+            arguments.get("consumes"),
+        ),
+        "get_building_info": lambda: tool_get_building_info(arguments.get("name", "")),
+        "get_spend_period": lambda: tool_get_spend_period(
+            arguments.get("section", "all"),
+            arguments.get("start_year"),
+            arguments.get("start_day"),
+            arguments.get("end_year"),
+            arguments.get("end_day"),
+        ),
+        "get_production_chain": lambda: tool_get_production_chain(arguments.get("resource", "")),
+        "get_break_even": lambda: tool_get_break_even(arguments.get("building", "")),
         "list_saves": lambda: tool_list_saves(),
         "get_trade": lambda: tool_get_trade(),
-        "get_trade_history": lambda: tool_get_trade_history(
-            arguments.get("resource"),
-            arguments.get("currency", "rub"),
-            arguments.get("direction", "import"),
-        ),
         "get_trade_period": lambda: tool_get_trade_period(
             arguments.get("start_year"),
             arguments.get("start_day"),
