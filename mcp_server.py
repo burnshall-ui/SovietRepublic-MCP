@@ -6,6 +6,7 @@ Pure tool functions are also imported directly by tests.
 """
 import json
 import logging
+import os
 from pathlib import Path
 
 from mcp.server import Server
@@ -16,15 +17,36 @@ from parser import parse_stats_file
 
 logger = logging.getLogger(__name__)
 
-STATS_PATH = Path(__file__).parent.parent / "media_soviet" / "save" / "autosave1" / "stats.ini"
-SAVES_DIR = STATS_PATH.parent.parent  # media_soviet/save/
+SAVES_DIR = Path(__file__).parent.parent / "media_soviet" / "save"
 BUILDINGS_DIR = Path(__file__).parent.parent / "media_soviet" / "buildings_types"
 
 
+def _get_stats_path() -> Path:
+    """Return path to stats.ini.
+
+    Priority:
+    1. SOVIET_SAVE env var (folder name, e.g. "autosave2" or "SEHR NEU")
+    2. Most recently modified save folder that contains stats.ini
+    """
+    save_name = os.environ.get("SOVIET_SAVE", "").strip()
+    if save_name:
+        explicit = SAVES_DIR / save_name / "stats.ini"
+        if explicit.exists():
+            return explicit
+        logger.warning("SOVIET_SAVE=%r not found, falling back to newest save", save_name)
+
+    candidates = [p / "stats.ini" for p in SAVES_DIR.iterdir()
+                  if p.is_dir() and (p / "stats.ini").exists()]
+    if not candidates:
+        return SAVES_DIR / "autosave1" / "stats.ini"  # safe fallback
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def _load() -> list:
-    if not STATS_PATH.exists():
+    path = _get_stats_path()
+    if not path.exists():
         return []
-    return parse_stats_file(STATS_PATH)
+    return parse_stats_file(path)
 
 # ---------------------------------------------------------------------------
 # Pure tool functions — no MCP dependency, tested directly
@@ -534,12 +556,16 @@ def tool_get_break_even(building: str) -> dict:
 
 
 def tool_list_saves() -> dict:
+    active_path = _get_stats_path()
     saves = []
     if SAVES_DIR.exists():
-        for p in sorted(SAVES_DIR.iterdir()):
+        for p in sorted(SAVES_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
             if p.is_dir() and (p / "stats.ini").exists():
-                saves.append({"name": p.name, "path": str(p)})
-    return {"saves": saves}
+                saves.append({
+                    "name": p.name,
+                    "active": (p / "stats.ini").resolve() == active_path.resolve(),
+                })
+    return {"saves": saves, "active_save": active_path.parent.name}
 
 
 # ---------------------------------------------------------------------------

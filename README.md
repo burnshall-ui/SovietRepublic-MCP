@@ -4,7 +4,7 @@ MCP server for [Workers & Resources: Soviet Republic](https://store.steampowered
 
 ## What it does
 
-Reads the game's autosave (`stats.ini`) on every tool call and returns current data — no background process, no stale cache.
+Reads the game's `stats.ini` on every tool call and returns current data — no background process, no stale cache. Always picks the most recently modified save automatically.
 
 ### Available tools
 
@@ -36,14 +36,6 @@ pip install -r requirements.txt
 
 ## Setup
 
-The server expects the game installed at the default Steam path. The autosave is read from:
-
-```
-<game root>/media_soviet/save/autosave1/stats.ini
-```
-
-If your game is installed elsewhere, update `STATS_PATH` in `mcp_server.py`.
-
 ### Claude Code (`~/.claude/settings.json`)
 
 ```json
@@ -64,13 +56,51 @@ If your game is installed elsewhere, update `STATS_PATH` in `mcp_server.py`.
   "mcpServers": {
     "soviet-republic": {
       "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
-      "args": ["E:\\SteamLibrary\\steamapps\\common\\SovietRepublic\\soviet_dashboard\\main.py"]
+      "args": ["E:\\SteamLibrary\\steamapps\\common\\SovietRepublic\\soviet_desktop\\main.py"]
     }
   }
 }
 ```
 
 Restart Claude after editing the config. The server starts automatically when needed.
+
+### Choosing a save
+
+By default the server loads the **most recently modified** save — whatever you last saved or autosaved in-game. No configuration needed.
+
+To pin a specific save, set the `SOVIET_SAVE` environment variable to the folder name inside `media_soviet/save/`:
+
+**Claude Code** (`~/.claude/settings.json`):
+```json
+{
+  "mcpServers": {
+    "soviet-republic": {
+      "command": "python",
+      "args": ["E:/SteamLibrary/steamapps/common/SovietRepublic/soviet_dashboard/main.py"],
+      "env": {
+        "SOVIET_SAVE": "autosave2"
+      }
+    }
+  }
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "soviet-republic": {
+      "command": "python.exe",
+      "args": ["E:\\SteamLibrary\\steamapps\\common\\SovietRepublic\\soviet_dashboard\\main.py"],
+      "env": {
+        "SOVIET_SAVE": "Meine Stadt"
+      }
+    }
+  }
+}
+```
+
+Use `list_saves` to see all available save folders. The response includes `"active_save"` showing which one is currently loaded.
 
 ## Usage
 
