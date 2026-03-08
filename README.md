@@ -4,7 +4,10 @@ MCP server for [Workers & Resources: Soviet Republic](https://store.steampowered
 
 ## What it does
 
-Reads the game's `stats.ini` on every tool call and returns current data — no background process, no stale cache. Always picks the most recently modified save automatically.
+Reads live game data on every tool call — no background process, no stale cache. Two data sources are used:
+
+- **`header.bin`** — contains the current in-game date and money balance, updated every autosave (~weekly in-game). Used by `get_realtime`.
+- **`stats.ini`** — contains period records (one snapshot per completed game year) with full economy, trade, and population history. Used by all other tools.
 
 ### Available tools
 
@@ -22,6 +25,7 @@ Reads the game's `stats.ini` on every tool call and returns current data — no 
 | `get_spend_period` | Resources consumed by constructions, factories, shops, or vehicles in a date range |
 | `get_production_chain` | All buildings that produce a resource, with input requirements and efficiency ranking |
 | `get_break_even` | Material cost per unit output vs import price — shows margin and profitability |
+| `get_realtime` | Current date and money (RUB + USD) from `header.bin` — more up-to-date than period records |
 | `list_saves` | All available save folders |
 
 ## Requirements
@@ -131,7 +135,7 @@ Once connected, ask Claude naturally:
 
 ```
 main.py          # Entry point — asyncio.run(run_mcp())
-mcp_server.py    # 13 MCP tools, reads fresh from disk per call
+mcp_server.py    # 17 MCP tools, reads fresh from disk per call
 parser.py        # Parses stats.ini → StatRecord dataclasses
 requirements.txt # mcp[cli]==1.3.0
 ```

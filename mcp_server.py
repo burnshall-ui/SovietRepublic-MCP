@@ -7,6 +7,7 @@ Pure tool functions are also imported directly by tests.
 import json
 import logging
 import os
+import struct
 from pathlib import Path
 
 from mcp.server import Server
@@ -19,15 +20,25 @@ logger = logging.getLogger(__name__)
 
 SAVES_DIR = Path(__file__).parent.parent / "media_soviet" / "save"
 BUILDINGS_DIR = Path(__file__).parent.parent / "media_soviet" / "buildings_types"
+ACTIVE_SAVE_FILE = Path(__file__).parent / "active_save.cfg"
 
 
 def _get_stats_path() -> Path:
     """Return path to stats.ini.
 
     Priority:
-    1. SOVIET_SAVE env var (folder name, e.g. "autosave2" or "SEHR NEU")
-    2. Most recently modified save folder that contains stats.ini
+    1. active_save.cfg file (set via set_active_save tool)
+    2. SOVIET_SAVE env var (folder name, e.g. "autosave2" or "SEHR NEU")
+    3. Most recently modified save folder that contains stats.ini
     """
+    if ACTIVE_SAVE_FILE.exists():
+        save_name = ACTIVE_SAVE_FILE.read_text(encoding="utf-8").strip()
+        if save_name:
+            explicit = SAVES_DIR / save_name / "stats.ini"
+            if explicit.exists():
+                return explicit
+            logger.warning("active_save.cfg=%r not found, falling back", save_name)
+
     save_name = os.environ.get("SOVIET_SAVE", "").strip()
     if save_name:
         explicit = SAVES_DIR / save_name / "stats.ini"
@@ -555,8 +566,57 @@ def tool_get_break_even(building: str) -> dict:
     return result
 
 
+def tool_get_realtime() -> dict:
+    """Read live game state directly from header.bin (updated every autosave)."""
+    stats_path = _get_stats_path()
+    save_dir = stats_path.parent
+    header_path = save_dir / "header.bin"
+    workers_path = save_dir / "workers.bin"
+
+    if not header_path.exists():
+        return {"error": f"header.bin not found in {save_dir}"}
+
+    data = header_path.read_bytes()
+    if len(data) < 0x1a0:
+        return {"error": "header.bin too small to parse"}
+
+    usd = struct.unpack_from("<f", data, 0x184)[0]
+    rub = struct.unpack_from("<f", data, 0x188)[0]
+    day = struct.unpack_from("<I", data, 0x198)[0]
+    year = struct.unpack_from("<I", data, 0x19c)[0]
+
+    # Convert 0-indexed day-of-year to day/month
+    month_lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    remaining = day
+    month = 0
+    while month < 11 and remaining >= month_lengths[month]:
+        remaining -= month_lengths[month]
+        month += 1
+    date_str = f"{remaining + 1}. {month_names[month]} {year}"
+
+    result = {
+        "save": save_dir.name,
+        "date": date_str,
+        "year": year,
+        "day_of_year": day + 1,
+        "money_rub": round(rub, 2),
+        "money_usd": round(usd, 2),
+        "source": "header.bin",
+        "note": "Updated every autosave (~weekly in-game). More current than stats.ini period records.",
+    }
+
+    if workers_path.exists():
+        wdata = workers_path.read_bytes()
+        if len(wdata) >= 4:
+            result["total_persons_registered"] = struct.unpack_from("<I", wdata, 0)[0]
+
+    return result
+
+
 def tool_list_saves() -> dict:
     active_path = _get_stats_path()
+    pinned = ACTIVE_SAVE_FILE.read_text(encoding="utf-8").strip() if ACTIVE_SAVE_FILE.exists() else None
     saves = []
     if SAVES_DIR.exists():
         for p in sorted(SAVES_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
@@ -565,7 +625,40 @@ def tool_list_saves() -> dict:
                     "name": p.name,
                     "active": (p / "stats.ini").resolve() == active_path.resolve(),
                 })
-    return {"saves": saves, "active_save": active_path.parent.name}
+    return {"saves": saves, "active_save": active_path.parent.name, "pinned": pinned}
+
+
+def tool_set_active_save(name: str) -> dict:
+    if not name:
+        return {"error": "Missing required argument: name"}
+    target = SAVES_DIR / name / "stats.ini"
+    if not target.exists():
+        # Try case-insensitive match
+        matches = [p for p in SAVES_DIR.iterdir()
+                   if p.is_dir() and p.name.lower() == name.lower() and (p / "stats.ini").exists()]
+        if not matches:
+            return {"error": f"Save '{name}' not found. Use list_saves to see available saves."}
+        name = matches[0].name
+    ACTIVE_SAVE_FILE.write_text(name, encoding="utf-8")
+    return {"ok": True, "active_save": name}
+
+
+def tool_get_active_save() -> dict:
+    if ACTIVE_SAVE_FILE.exists():
+        pinned = ACTIVE_SAVE_FILE.read_text(encoding="utf-8").strip()
+        return {"mode": "pinned", "active_save": pinned}
+    env_save = os.environ.get("SOVIET_SAVE", "").strip()
+    if env_save:
+        return {"mode": "env_var", "active_save": env_save}
+    active = _get_stats_path().parent.name
+    return {"mode": "auto_newest", "active_save": active}
+
+
+def tool_clear_active_save() -> dict:
+    if ACTIVE_SAVE_FILE.exists():
+        ACTIVE_SAVE_FILE.unlink()
+        return {"ok": True, "mode": "auto_newest", "note": "Pin removed — now following the most recently modified save."}
+    return {"ok": True, "note": "No pin was set."}
 
 
 # ---------------------------------------------------------------------------
@@ -706,8 +799,38 @@ TOOLS = [
         },
     ),
     Tool(
+        name="get_realtime",
+        description=(
+            "Get live game state from header.bin: current date, money (RUB + USD). "
+            "More current than get_stats — updated every autosave (~weekly in-game). "
+            "Use this for current balance and exact date."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
         name="list_saves",
-        description="List all available save folders",
+        description="List all available save folders and show which one is currently active",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="set_active_save",
+        description="Pin a specific save folder as the active save. Use the exact folder name from list_saves.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Save folder name, e.g. '22804 - test_claude' or 'autosave1'"},
+            },
+            "required": ["name"],
+        },
+    ),
+    Tool(
+        name="get_active_save",
+        description="Show which save is currently active and how it was selected (pinned / env_var / auto_newest)",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="clear_active_save",
+        description="Remove the pinned save — reverts to automatically following the most recently modified save",
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
@@ -791,7 +914,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         ),
         "get_production_chain": lambda: tool_get_production_chain(arguments.get("resource", "")),
         "get_break_even": lambda: tool_get_break_even(arguments.get("building", "")),
+        "get_realtime": lambda: tool_get_realtime(),
         "list_saves": lambda: tool_list_saves(),
+        "set_active_save": lambda: tool_set_active_save(arguments.get("name", "")),
+        "get_active_save": lambda: tool_get_active_save(),
+        "clear_active_save": lambda: tool_clear_active_save(),
         "get_trade": lambda: tool_get_trade(),
         "get_trade_period": lambda: tool_get_trade_period(
             arguments.get("start_year"),
