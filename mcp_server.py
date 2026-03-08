@@ -670,7 +670,15 @@ server = Server("soviet-republic")
 TOOLS = [
     Tool(
         name="get_stats",
-        description="Get complete current game snapshot (population, economy, year/day)",
+        description=(
+            "Get complete snapshot from the latest stats.ini period record: population, year/day, "
+            "and economy data. "
+            "IMPORTANT: 'economy_rub' and 'economy_usd' contain MARKET PRICES per unit (RUB or USD "
+            "per tonne/MWh/etc.) — NOT production quantities, NOT output volumes. "
+            "To get actual production quantities use get_spend_period (factory inputs) or "
+            "the Resources_Produced data via get_history. "
+            "For current date and money balance use get_realtime instead."
+        ),
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
@@ -680,7 +688,11 @@ TOOLS = [
     ),
     Tool(
         name="get_economy",
-        description="Get all resource prices in RUB and USD",
+        description=(
+            "Get all resource MARKET PRICES in RUB and USD (price per tonne, MWh, m³, etc.). "
+            "These are import/export prices — NOT production quantities or output volumes. "
+            "Example: 'steel: 763' means 1 tonne of steel costs 763 RUB on the market."
+        ),
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
@@ -690,13 +702,17 @@ TOOLS = [
     ),
     Tool(
         name="get_history",
-        description="Get time series data for a metric across all saved records",
+        description=(
+            "Get time series of a metric across all period records in stats.ini. "
+            "For economy metrics (e.g. 'steel', 'food'): returns MARKET PRICE history, not production. "
+            "For 'total_population' or citizen fields: returns demographic history."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "metric": {
                     "type": "string",
-                    "description": "Metric name: 'total_population', citizen field, or resource name (e.g. 'steel')",
+                    "description": "Metric name: 'total_population', citizen field, or resource name (e.g. 'steel' = price history)",
                 }
             },
         },

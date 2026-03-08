@@ -106,6 +106,45 @@ To pin a specific save, set the `SOVIET_SAVE` environment variable to the folder
 
 Use `list_saves` to see all available save folders. The response includes `"active_save"` showing which one is currently loaded.
 
+## Data sources and field meanings
+
+Understanding what each data field actually represents avoids common misinterpretations:
+
+### `economy_rub` / `economy_usd` — Market prices, NOT production quantities
+
+The most important thing to know: the `economy_rub` and `economy_usd` fields returned by `get_stats` and `get_economy` are **import/export market prices per unit** (RUB or USD per tonne, per MWh, per m³, etc.). They do NOT represent how much of a resource your republic produced.
+
+```json
+"economy_rub": {
+  "steel": 763.18,       ← 763 RUB per tonne (market price)
+  "chemicals": 1953.67,  ← 1953 RUB per tonne (market price)
+  "nuclearfuel": 246327  ← 246,327 RUB per unit (market price)
+}
+```
+
+### `Resources_Produced` — Actual production quantities (natural resources only)
+
+The game only logs production quantities for **naturally extracted / grown resources**:
+- `rawbauxite` (Rohes Bauxit)
+- `plants` (Pflanzen)
+- `food` (Essen)
+- `gravel` (Kies)
+- `rawgravel` (Bruchstein)
+- `asphalt`, `concrete`, etc.
+
+Factory-processed goods (steel, aluminium, chemicals, electronics, …) are **not tracked as production quantities** in `stats.ini`. Use the in-game Statistics → Production tab for those.
+
+### Data sources summary
+
+| What you want | Tool | What it returns |
+|---|---|---|
+| Current date & money balance | `get_realtime` | Live from `header.bin` |
+| Production quantities (natural) | `get_spend_period section=factories` | Factory input consumption as proxy |
+| Market prices for resources | `get_economy` / `get_stats` → economy_rub/usd | Price per unit |
+| Import/export volumes | `get_trade_period` | Tonnes traded, cost paid |
+| Population & demographics | `get_population` | Citizen counts |
+| Historical price trends | `get_history metric=steel` | Price over time |
+
 ## Usage
 
 Once connected, ask Claude naturally:
