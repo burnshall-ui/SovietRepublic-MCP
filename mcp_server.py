@@ -121,13 +121,13 @@ def tool_get_citizen_status() -> dict:
     return {"status": rec.citizen_status, "labeled": labeled}
 
 
-def tool_get_history(metric: str = "total_population") -> dict:
+def tool_get_history(metric: str = "total_population", limit: int = 50) -> dict:
     records = _load()
     if not records:
         return {"metric": metric, "data": [], "warning": "No records loaded"}
     data = []
     found = False
-    for r in records:
+    for r in sorted(records, key=lambda r: _date_key(r.year, r.day)):
         if metric == "total_population":
             val = r.total_population
             found = True
@@ -140,7 +140,11 @@ def tool_get_history(metric: str = "total_population") -> dict:
         else:
             val = None
         data.append({"index": r.index, "year": r.year, "day": r.day, "value": val})
-    result: dict = {"metric": metric, "data": data}
+    if limit > 0:
+        data = data[-limit:]
+    result: dict = {"metric": metric, "data": data, "total_records": len(records)}
+    if limit > 0 and len(records) > limit:
+        result["note"] = f"Showing last {limit} of {len(records)} records. Pass limit=0 for all."
     if not found:
         result["warning"] = f"Metric '{metric}' not found in any record"
     return result
@@ -254,8 +258,8 @@ def tool_get_trade_period(
     if not records:
         return {"error": "No data loaded"}
 
-    # Filter out index-0 records with year=0 (empty/placeholder)
-    valid = [r for r in records if r.year > 0]
+    # Filter out index-0 records with year=0 (empty/placeholder), sort by date
+    valid = sorted([r for r in records if r.year > 0], key=lambda r: _date_key(r.year, r.day))
     if not valid:
         return {"error": "No valid records with date > 0"}
 
@@ -413,7 +417,7 @@ def tool_get_spend_period(
     records = _load()
     if not records:
         return {"error": "No data loaded"}
-    valid = [r for r in records if r.year > 0]
+    valid = sorted([r for r in records if r.year > 0], key=lambda r: _date_key(r.year, r.day))
     if not valid:
         return {"error": "No valid records"}
 
@@ -713,7 +717,11 @@ TOOLS = [
                 "metric": {
                     "type": "string",
                     "description": "Metric name: 'total_population', citizen field, or resource name (e.g. 'steel' = price history)",
-                }
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max number of recent records to return. Default 50. Pass 0 for all (may be large).",
+                },
             },
         },
     ),
@@ -914,7 +922,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         "get_population": lambda: tool_get_population(),
         "get_economy": lambda: tool_get_economy(),
         "get_citizen_status": lambda: tool_get_citizen_status(),
-        "get_history": lambda: tool_get_history(arguments.get("metric", "total_population")),
+        "get_history": lambda: tool_get_history(arguments.get("metric", "total_population"), arguments.get("limit", 50)),
         "list_buildings": lambda: tool_list_buildings(
             arguments.get("type"),
             arguments.get("produces"),
