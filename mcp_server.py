@@ -59,6 +59,18 @@ def _load() -> list:
         return []
     return parse_stats_file(path)
 
+
+def _latest(records: list):
+    """Return the most recent periodic record by date.
+
+    The last record in the file is often a mega-record with mixed sub-record
+    data and a stale date.  Sorting by (year, day) picks the true latest.
+    """
+    valid = [r for r in records if r.year > 0]
+    if not valid:
+        return records[-1] if records else None
+    return max(valid, key=lambda r: _date_key(r.year, r.day))
+
 # ---------------------------------------------------------------------------
 # Pure tool functions — no MCP dependency, tested directly
 # ---------------------------------------------------------------------------
@@ -67,7 +79,7 @@ def tool_get_stats() -> dict:
     records = _load()
     if not records:
         return {"error": "No data loaded"}
-    rec = records[-1]
+    rec = _latest(records)
     return {
         "year": rec.year,
         "day": rec.day,
@@ -83,7 +95,7 @@ def tool_get_population() -> dict:
     records = _load()
     if not records:
         return {"error": "No data loaded"}
-    rec = records[-1]
+    rec = _latest(records)
     return {
         "total_population": rec.total_population,
         **rec.citizens,
@@ -94,7 +106,7 @@ def tool_get_economy() -> dict:
     records = _load()
     if not records:
         return {"error": "No data loaded"}
-    rec = records[-1]
+    rec = _latest(records)
     return {
         "rub": rec.economy_rub,
         "usd": rec.economy_usd,
@@ -112,7 +124,7 @@ def tool_get_citizen_status() -> dict:
     records = _load()
     if not records:
         return {"error": "No data loaded"}
-    rec = records[-1]
+    rec = _latest(records)
     labeled = {
         STATUS_LABELS[i]: v
         for i, v in enumerate(rec.citizen_status)
@@ -513,7 +525,7 @@ def tool_get_break_even(building: str) -> dict:
     records = _load()
     if not records:
         return {"error": "No economy data loaded"}
-    rec = records[-1]
+    rec = _latest(records)
     prices_rub = rec.economy_rub
     workday_cost = rec.economy_scalars.get("Economy_WorkdayCostRUB", 0.0)
 
