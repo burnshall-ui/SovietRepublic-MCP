@@ -7,19 +7,19 @@ MCP server for [Workers & Resources: Soviet Republic](https://store.steampowered
 Reads live game data on every tool call — no background process, no stale cache. Two data sources are used:
 
 - **`header.bin`** — contains the current in-game date and money balance, updated every autosave (~weekly in-game). Used by `get_realtime`.
-- **`stats.ini`** — contains period records (one snapshot per completed game year) with full economy, trade, and population history. Used by all other tools.
+- **`stats.ini`** — contains periodic records (one snapshot every ~5 in-game days) with economy prices, trade volumes, spending, and population data. Used by all other tools.
 
 ### Available tools
 
 | Tool | Description |
-|---|---|
+| --- | --- |
 | `get_stats` | Full snapshot: population, economy, year/day |
 | `get_population` | Citizen counts and demographics |
 | `get_economy` | All resource prices in RUB and USD |
 | `get_citizen_status` | Happiness metrics (food, water, healthcare, …) on 0–1 scale |
 | `get_history` | Time series for any metric across all autosave records |
 | `get_trade` | Cumulative import/export totals since game start |
-| `get_trade_period` | Import/export totals for a specific date range (delta between two snapshots) |
+| `get_trade_period` | Import/export quantities for a date range (summed across all periodic records) |
 | `list_buildings` | Browse building definitions filtered by type, produced or consumed resource |
 | `get_building_info` | Full I/O details for a specific building (workers, production rates, consumption rates) |
 | `get_spend_period` | Resources consumed by constructions, factories, shops, or vehicles in a date range |
@@ -27,6 +27,9 @@ Reads live game data on every tool call — no background process, no stale cach
 | `get_break_even` | Material cost per unit output vs import price — shows margin and profitability |
 | `get_realtime` | Current date and money (RUB + USD) from `header.bin` — more up-to-date than period records |
 | `list_saves` | All available save folders |
+| `set_active_save` | Pin a specific save folder as the active save |
+| `get_active_save` | Show which save is active and how it was selected |
+| `clear_active_save` | Remove the pin and follow the newest save again |
 
 ## Requirements
 
@@ -34,7 +37,7 @@ Reads live game data on every tool call — no background process, no stale cach
 - Workers & Resources: Soviet Republic installed (Steam)
 - `mcp[cli]==1.3.0`
 
-```
+```bash
 pip install -r requirements.txt
 ```
 
@@ -60,7 +63,7 @@ pip install -r requirements.txt
   "mcpServers": {
     "soviet-republic": {
       "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
-      "args": ["E:\\SteamLibrary\\steamapps\\common\\SovietRepublic\\soviet_desktop\\main.py"]
+      "args": ["E:\\SteamLibrary\\steamapps\\common\\SovietRepublic\\soviet_dashboard\\main.py"]
     }
   }
 }
@@ -72,9 +75,12 @@ Restart Claude after editing the config. The server starts automatically when ne
 
 By default the server loads the **most recently modified** save — whatever you last saved or autosaved in-game. No configuration needed.
 
-To pin a specific save, set the `SOVIET_SAVE` environment variable to the folder name inside `media_soviet/save/`:
+To pin a specific save permanently for this local checkout, use the MCP tools `set_active_save`, `get_active_save`, and `clear_active_save`.
+
+To pin a specific save via configuration, set the `SOVIET_SAVE` environment variable to the folder name inside `media_soviet/save/`:
 
 **Claude Code** (`~/.claude/settings.json`):
+
 ```json
 {
   "mcpServers": {
@@ -90,6 +96,7 @@ To pin a specific save, set the `SOVIET_SAVE` environment variable to the folder
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`):
+
 ```json
 {
   "mcpServers": {
@@ -105,6 +112,7 @@ To pin a specific save, set the `SOVIET_SAVE` environment variable to the folder
 ```
 
 Use `list_saves` to see all available save folders. The response includes `"active_save"` showing which one is currently loaded.
+Use `set_active_save` to pin one save from inside Claude, `get_active_save` to inspect the current mode, and `clear_active_save` to go back to automatic newest-save selection.
 
 ## Data sources and field meanings
 
@@ -125,6 +133,7 @@ The most important thing to know: the `economy_rub` and `economy_usd` fields ret
 ### `Resources_Produced` — Actual production quantities (natural resources only)
 
 The game only logs production quantities for **naturally extracted / grown resources**:
+
 - `rawbauxite` (Rohes Bauxit)
 - `plants` (Pflanzen)
 - `food` (Essen)
@@ -137,11 +146,11 @@ Factory-processed goods (steel, aluminium, chemicals, electronics, …) are **no
 ### Data sources summary
 
 | What you want | Tool | What it returns |
-|---|---|---|
+| --- | --- | --- |
 | Current date & money balance | `get_realtime` | Live from `header.bin` |
 | Production quantities (natural) | `get_spend_period section=factories` | Factory input consumption as proxy |
 | Market prices for resources | `get_economy` / `get_stats` → economy_rub/usd | Price per unit |
-| Import/export volumes | `get_trade_period` | Tonnes traded, cost paid |
+| Import/export volumes | `get_trade_period` | Tonnes traded per resource (costs only via `get_trade` cumulative) |
 | Population & demographics | `get_population` | Citizen counts |
 | Historical price trends | `get_history metric=steel` | Price over time |
 
@@ -149,30 +158,34 @@ Factory-processed goods (steel, aluminium, chemicals, electronics, …) are **no
 
 Once connected, ask Claude naturally:
 
-**Economy & trade**
+### Economy & trade
+
 > *"What's my current food supply satisfaction?"*
 > *"Show me steel import history."*
 > *"How much have I imported vs exported this year?"*
 > *"What are the current market prices for building materials?"*
 
-**Production planning**
+### Production planning
+
 > *"What buildings can produce aluminium, and which is the most efficient?"*
 > *"What's the full production chain for steel — what raw materials do I need?"*
 > *"Is it cheaper to produce electricity with a coal plant or to import it?"*
 > *"Show me the break-even analysis for the steel mill."*
 
-**Resource consumption**
+### Resource consumption
+
 > *"What resources did my construction sites use this year?"*
 > *"How much fuel have my vehicles consumed since the start of the game?"*
 > *"What did my factories consume last year compared to this year?"*
 
-**Building lookup**
+### Building lookup
+
 > *"List all buildings that produce concrete."*
 > *"What are the input and output rates of the coal processing plant?"*
 
 ## Project structure
 
-```
+```text
 main.py          # Entry point — asyncio.run(run_mcp())
 mcp_server.py    # 17 MCP tools, reads fresh from disk per call
 parser.py        # Parses stats.ini → StatRecord dataclasses

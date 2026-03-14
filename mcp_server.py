@@ -1,7 +1,7 @@
 """
 MCP server exposing Soviet Republic game data as tools.
 
-Run standalone via: python main.py --mcp
+Run standalone via: python main.py
 Pure tool functions are also imported directly by tests.
 """
 import json
@@ -154,10 +154,24 @@ def tool_get_trade() -> dict:
     records = _load()
     if not records:
         return {"error": "No data loaded"}
-    rec = records[-1]
+    # Use the record with the largest total export value (the cumulative grand-total
+    # record), rather than records[-1] which may have a stale/wrong date due to the
+    # mega-record structure in stats.ini.
+    def _trade_total(r):
+        return sum(
+            (e["amount"] if isinstance(e, dict) else e)
+            for e in r.trade_export_rub.values()
+        ) + sum(
+            (e["amount"] if isinstance(e, dict) else e)
+            for e in r.trade_import_rub.values()
+        )
+    rec = max(records, key=_trade_total)
+    # Use the latest periodic record's date (mega-record date is unreliable)
+    valid_dated = [r for r in records if r.year > 0]
+    latest = max(valid_dated, key=lambda r: _date_key(r.year, r.day)) if valid_dated else rec
     return {
-        "year": rec.year,
-        "day": rec.day,
+        "year": latest.year,
+        "day": latest.day,
         "imports": {
             "rub": rec.trade_import_rub,
             "usd": rec.trade_import_usd,
@@ -224,25 +238,19 @@ def _find_nearest_record(records: list, year: int, day: int, mode: str = "neares
     return best
 
 
-def _diff_trade_dicts(end_dict: dict, start_dict: dict) -> dict:
-    """Compute per-resource difference between two trade dicts.
-    Values are {amount, cost} dicts. Only includes resources with non-zero diff."""
-    all_keys = set(end_dict.keys()) | set(start_dict.keys())
-    result = {}
-    for k in sorted(all_keys):
-        end_entry = end_dict.get(k, {"amount": 0.0, "cost": 0.0})
-        start_entry = start_dict.get(k, {"amount": 0.0, "cost": 0.0})
-        # Handle legacy format (plain float) gracefully
-        end_amt = end_entry["amount"] if isinstance(end_entry, dict) else end_entry
-        end_cost = end_entry.get("cost", 0.0) if isinstance(end_entry, dict) else 0.0
-        start_amt = start_entry["amount"] if isinstance(start_entry, dict) else start_entry
-        start_cost = start_entry.get("cost", 0.0) if isinstance(start_entry, dict) else 0.0
+def _sum_trade_values(records: list, field: str) -> dict:
+    """Sum per-resource amounts across all records for a given trade/spend field.
 
-        diff_amt = round(end_amt - start_amt, 2)
-        diff_cost = round(end_cost - start_cost, 2)
-        if diff_amt != 0.0 or diff_cost != 0.0:
-            result[k] = {"quantity": diff_amt, "cost": diff_cost}
-    return result
+    Each periodic record stores the amount traded/spent during that ~5-day
+    period (NOT a running cumulative).  Summing gives the total for the range.
+    Cost data in periodic records is typically 0, so only amounts are reliable.
+    """
+    totals: dict[str, float] = {}
+    for r in records:
+        for k, entry in getattr(r, field).items():
+            amt = entry["amount"] if isinstance(entry, dict) else entry
+            totals[k] = totals.get(k, 0.0) + amt
+    return {k: {"quantity": round(v, 2)} for k, v in sorted(totals.items()) if round(v, 2) != 0.0}
 
 
 def tool_get_trade_period(
@@ -253,7 +261,7 @@ def tool_get_trade_period(
     direction: str = "both",
     currency: str = "rub",
 ) -> dict:
-    """Trade totals for a date range, computed as (end - start) of cumulative values."""
+    """Trade totals for a date range, computed by summing periodic record values."""
     records = _load()
     if not records:
         return {"error": "No data loaded"}
@@ -263,33 +271,26 @@ def tool_get_trade_period(
     if not valid:
         return {"error": "No valid records with date > 0"}
 
-    # Determine start record
-    if start_year is not None:
-        s_day = start_day if start_day is not None else 1
-        start_rec = _find_nearest_record(valid, start_year, s_day, mode="at_or_after")
-    else:
-        start_rec = valid[0]
+    # Determine date range
+    s_year = start_year if start_year is not None else valid[0].year
+    s_day = start_day if start_day is not None else 1
+    e_year = end_year if end_year is not None else valid[-1].year
+    e_day = end_day if end_day is not None else 365
+    range_start = _date_key(s_year, s_day)
+    range_end = _date_key(e_year, e_day)
 
-    # Determine end record
-    if end_year is not None:
-        e_day = end_day if end_day is not None else 365
-        end_rec = _find_nearest_record(valid, end_year, e_day, mode="at_or_before")
-    else:
-        end_rec = valid[-1]
-
-    if start_rec is None or end_rec is None:
-        return {"error": "No records found for the specified date range"}
-
-    if _date_key(end_rec.year, end_rec.day) < _date_key(start_rec.year, start_rec.day):
-        return {"error": f"End date ({end_rec.year}/{end_rec.day}) is before "
-                         f"start date ({start_rec.year}/{start_rec.day})"}
+    # Select all records within the date range
+    in_range = [r for r in valid if range_start <= _date_key(r.year, r.day) <= range_end]
+    if not in_range:
+        return {"error": f"No records found between {s_year}/{s_day} and {e_year}/{e_day}"}
 
     result = {
         "period": {
-            "from": f"{start_rec.year}/{start_rec.day}",
-            "to": f"{end_rec.year}/{end_rec.day}",
+            "from": f"{in_range[0].year}/{in_range[0].day}",
+            "to": f"{in_range[-1].year}/{in_range[-1].day}",
         },
         "currency": currency,
+        "records_summed": len(in_range),
     }
 
     import_field = _TRADE_FIELD_MAP.get(("import", currency))
@@ -300,16 +301,10 @@ def tool_get_trade_period(
                          f"Valid: rub, usd, international_rub, international_usd"}
 
     if direction in ("both", "import"):
-        result["imports"] = _diff_trade_dicts(
-            getattr(end_rec, import_field),
-            getattr(start_rec, import_field),
-        )
+        result["imports"] = _sum_trade_values(in_range, import_field)
 
     if direction in ("both", "export"):
-        result["exports"] = _diff_trade_dicts(
-            getattr(end_rec, export_field),
-            getattr(start_rec, export_field),
-        )
+        result["exports"] = _sum_trade_values(in_range, export_field)
 
     return result
 
@@ -421,23 +416,24 @@ def tool_get_spend_period(
     if not valid:
         return {"error": "No valid records"}
 
+    s_year = start_year if start_year is not None else valid[0].year
     s_day = start_day if start_day is not None else 1
-    e_day = end_day   if end_day   is not None else 365
-    start_rec = _find_nearest_record(valid, start_year, s_day, "at_or_after")  if start_year is not None else valid[0]
-    end_rec   = _find_nearest_record(valid, end_year,   e_day, "at_or_before") if end_year   is not None else valid[-1]
+    e_year = end_year if end_year is not None else valid[-1].year
+    e_day = end_day if end_day is not None else 365
+    range_start = _date_key(s_year, s_day)
+    range_end = _date_key(e_year, e_day)
 
-    if start_rec is None or end_rec is None:
-        return {"error": "No records found for the specified date range"}
-    if _date_key(end_rec.year, end_rec.day) < _date_key(start_rec.year, start_rec.day):
-        return {"error": "End date is before start date"}
+    in_range = [r for r in valid if range_start <= _date_key(r.year, r.day) <= range_end]
+    if not in_range:
+        return {"error": f"No records found between {s_year}/{s_day} and {e_year}/{e_day}"}
 
     sections = list(_SPEND_FIELD_MAP) if section == "all" else [section]
     result = {
-        "period": {"from": f"{start_rec.year}/{start_rec.day}", "to": f"{end_rec.year}/{end_rec.day}"},
+        "period": {"from": f"{in_range[0].year}/{in_range[0].day}", "to": f"{in_range[-1].year}/{in_range[-1].day}"},
+        "records_summed": len(in_range),
     }
     for sec in sections:
-        field = _SPEND_FIELD_MAP[sec]
-        result[sec] = _diff_trade_dicts(getattr(end_rec, field), getattr(start_rec, field))
+        result[sec] = _sum_trade_values(in_range, _SPEND_FIELD_MAP[sec])
     return result
 
 
@@ -870,12 +866,10 @@ TOOLS = [
     Tool(
         name="get_trade_period",
         description=(
-            "Get import/export totals for a date range. Returns the DIFFERENCE "
-            "between cumulative trade values at end vs start, giving you the actual "
-            "trade volume for that period. Omit start for 'since game start', omit "
-            "end for 'until now'. "
-            "Each resource entry has 'quantity' (physical units: tonnes, MWh, m³, etc. — NOT money) "
-            "and 'cost' (total currency value spent/earned in the specified currency)."
+            "Get import/export totals for a date range by summing all periodic records. "
+            "Returns physical quantities (tonnes, MWh, m³, etc.) per resource. "
+            "Omit start for 'since game start', omit end for 'until now'. "
+            "Note: per-period cost data is not available — use get_trade for cumulative costs."
         ),
         inputSchema={
             "type": "object",
