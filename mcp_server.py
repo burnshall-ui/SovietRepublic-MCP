@@ -15,12 +15,9 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from parser import parse_stats_file
+from paths import ACTIVE_SAVE_FILE, BUILDINGS_DIR, SAVES_DIR, resolve_within
 
 logger = logging.getLogger(__name__)
-
-SAVES_DIR = Path(__file__).parent.parent / "media_soviet" / "save"
-BUILDINGS_DIR = Path(__file__).parent.parent / "media_soviet" / "buildings_types"
-ACTIVE_SAVE_FILE = Path(__file__).parent / "active_save.cfg"
 
 
 def _get_stats_path() -> Path:
@@ -34,17 +31,17 @@ def _get_stats_path() -> Path:
     if ACTIVE_SAVE_FILE.exists():
         save_name = ACTIVE_SAVE_FILE.read_text(encoding="utf-8").strip()
         if save_name:
-            explicit = SAVES_DIR / save_name / "stats.ini"
-            if explicit.exists():
+            explicit = resolve_within(SAVES_DIR, save_name, "stats.ini")
+            if explicit is not None and explicit.exists():
                 return explicit
-            logger.warning("active_save.cfg=%r not found, falling back", save_name)
+            logger.warning("active_save.cfg=%r not usable, falling back", save_name)
 
     save_name = os.environ.get("SOVIET_SAVE", "").strip()
     if save_name:
-        explicit = SAVES_DIR / save_name / "stats.ini"
-        if explicit.exists():
+        explicit = resolve_within(SAVES_DIR, save_name, "stats.ini")
+        if explicit is not None and explicit.exists():
             return explicit
-        logger.warning("SOVIET_SAVE=%r not found, falling back to newest save", save_name)
+        logger.warning("SOVIET_SAVE=%r not usable, falling back to newest save", save_name)
 
     candidates = [p / "stats.ini" for p in SAVES_DIR.iterdir()
                   if p.is_dir() and (p / "stats.ini").exists()]
@@ -402,8 +399,8 @@ def tool_list_buildings(type: str = None, produces: str = None, consumes: str = 
 def tool_get_building_info(name: str) -> dict:
     if not name:
         return {"error": "Missing required argument: name"}
-    path = BUILDINGS_DIR / f"{name}.ini"
-    if not path.exists():
+    path = resolve_within(BUILDINGS_DIR, f"{name}.ini")
+    if path is None or not path.exists():
         # Try case-insensitive search
         matches = [p for p in BUILDINGS_DIR.glob("*.ini") if p.stem.lower() == name.lower()]
         if not matches:
@@ -514,8 +511,8 @@ def tool_get_production_chain(resource: str) -> dict:
 def tool_get_break_even(building: str) -> dict:
     if not building:
         return {"error": "Missing required argument: building"}
-    path = BUILDINGS_DIR / f"{building}.ini"
-    if not path.exists():
+    path = resolve_within(BUILDINGS_DIR, f"{building}.ini")
+    if path is None or not path.exists():
         matches = [p for p in BUILDINGS_DIR.glob("*.ini") if p.stem.lower() == building.lower()]
         if not matches:
             return {"error": f"Building '{building}' not found. Use list_buildings to browse."}
@@ -643,16 +640,20 @@ def tool_list_saves() -> dict:
 def tool_set_active_save(name: str) -> dict:
     if not name:
         return {"error": "Missing required argument: name"}
-    target = SAVES_DIR / name / "stats.ini"
-    if not target.exists():
+    target = resolve_within(SAVES_DIR, name, "stats.ini")
+    if target is None or not target.exists():
         # Try case-insensitive match
         matches = [p for p in SAVES_DIR.iterdir()
                    if p.is_dir() and p.name.lower() == name.lower() and (p / "stats.ini").exists()]
         if not matches:
             return {"error": f"Save '{name}' not found. Use list_saves to see available saves."}
-        name = matches[0].name
-    ACTIVE_SAVE_FILE.write_text(name, encoding="utf-8")
-    return {"ok": True, "active_save": name}
+        target = matches[0] / "stats.ini"
+    # Persist the location relative to the saves directory rather than whatever
+    # string the caller sent. This file is read back on the next start, so it
+    # must not carry traversal with it.
+    stored = target.parent.resolve().relative_to(SAVES_DIR.resolve()).as_posix()
+    ACTIVE_SAVE_FILE.write_text(stored, encoding="utf-8")
+    return {"ok": True, "active_save": stored}
 
 
 def tool_get_active_save() -> dict:

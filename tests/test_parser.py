@@ -1,8 +1,17 @@
 import pathlib, sys
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from parser import parse_stats_file
 
 STATS = pathlib.Path(__file__).parent.parent.parent / "media_soviet" / "save" / "autosave1" / "stats.ini"
+
+# Needs a real save file, which lives outside the repository. Skip in a fresh
+# checkout instead of failing.
+pytestmark = pytest.mark.skipif(
+    not STATS.exists(),
+    reason=f"game save not present at {STATS}",
+)
 
 def test_spend_fields_exist():
     records = parse_stats_file(STATS)

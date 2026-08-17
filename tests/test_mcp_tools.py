@@ -1,5 +1,18 @@
 import sys, pathlib
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+
+from paths import SAVES_DIR
+
+# These exercise the real game data, which lives outside the repository, so a
+# fresh checkout has nothing to run them against. Skip rather than fail — see
+# tests/test_path_safety.py for the checks that stand on their own.
+pytestmark = pytest.mark.skipif(
+    not SAVES_DIR.exists(),
+    reason=f"game data not present at {SAVES_DIR}",
+)
+
 from mcp_server import tool_get_spend_period
 
 def test_spend_period_vehicles_returns_fuel():
